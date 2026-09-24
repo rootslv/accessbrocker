@@ -1,0 +1,7 @@
+ca/
+logs/
+client/keys/
+__pycache__/
+*.pyc
+.venv/
+venv/
