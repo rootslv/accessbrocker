@@ -1,93 +1,43 @@
-"""
-Клиент для "агента" — вместо того, чтобы иметь постоянный root-ключ,
-агент каждый раз просит у broker'а временный сертификат под конкретную задачу.
-
-Использование:
-    python agent_ssh.py deploy-nutricio --task-id my-task-1
-    python agent_ssh.py deploy-nutricio --task-id my-task-1 --try-forbidden
-"""
+"""Demo AI agent: it submits an intent and never receives SSH credentials."""
 
 import argparse
-import subprocess
 import sys
-from pathlib import Path
 
 import requests
 
 BROKER_URL = "http://localhost:8000"
-KEY_DIR = Path(__file__).resolve().parent / "keys"
-KEY_DIR.mkdir(exist_ok=True)
-
-SSH_PORT = "2222"
-SSH_HOST = "localhost"  # для демо — контейнер проброшен на localhost:2222
-
-
-def ensure_keypair() -> tuple[Path, Path]:
-    priv = KEY_DIR / "agent_key"
-    pub = KEY_DIR / "agent_key.pub"
-    if not priv.exists():
-        subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-f", str(priv), "-N", ""],
-            check=True,
-        )
-    return priv, pub
+DEMO_TOKENS = {
+    "devin-prod": "demo-devin-token",
+    "vpn-support-agent": "demo-support-token",
+}
 
 
-def request_certificate(scope: str, task_id: str, pub_key_path: Path) -> dict:
-    resp = requests.post(
-        f"{BROKER_URL}/request-access",
-        json={
-            "scope": scope,
-            "agent_name": "devin",
-            "task_id": task_id,
-            "public_key": pub_key_path.read_text(),
-        },
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        print(f"[DENIED] {resp.status_code}: {resp.json().get('detail')}")
-        sys.exit(1)
-    return resp.json()
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("scope", help="Например: deploy-nutricio")
-    parser.add_argument("--task-id", default="demo-task")
-    parser.add_argument(
-        "--try-forbidden",
-        action="store_true",
-        help="Демо: попытаться выполнить НЕ разрешённую команду через тот же сертификат",
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Request one brokered infrastructure action")
+    parser.add_argument("action", choices=["restart_nutricio", "show_vpn_logs"])
+    parser.add_argument("--task-id", default="INC-1842")
+    parser.add_argument("--target", default=None)
+    parser.add_argument("--agent", choices=DEMO_TOKENS, default="devin-prod")
     args = parser.parse_args()
 
-    priv_key, pub_key = ensure_keypair()
-
-    print(f"[agent] Requesting access for scope='{args.scope}', task='{args.task_id}'...")
-    result = request_certificate(args.scope, args.task_id, pub_key)
-
-    cert_path = KEY_DIR / f"{result['cert_id']}-cert.pub"
-    cert_path.write_text(result["certificate"])
-
-    print(f"[agent] Got certificate. principal={result['principal']} ttl={result['ttl']}")
-    print(f"[agent] Connecting to {result['host']} as {result['principal']}...")
-
-    command = "echo THIS SHOULD BE BLOCKED; rm -rf /tmp/whatever" if args.try_forbidden else ""
-
-    ssh_cmd = [
-        "ssh",
-        "-i", str(priv_key),
-        "-o", f"CertificateFile={cert_path}",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-p", SSH_PORT,
-        f"{result['principal']}@{SSH_HOST}",
-    ]
-    if command:
-        ssh_cmd.append(command)
-
-    print(f"[agent] Running: ssh ... {'<forbidden command attempt>' if command else '(allowed command)'}")
-    subprocess.run(ssh_cmd)
+    defaults = {
+        "restart_nutricio": "nutricio-server",
+        "show_vpn_logs": "root-vpn-node-1",
+    }
+    intent = {"task_id": args.task_id, "action": args.action, "target": args.target or defaults[args.action]}
+    print(f"[agent] requesting intent: {intent}")
+    response = requests.post(
+        f"{BROKER_URL}/execute-intent", json=intent,
+        headers={"Authorization": f"Bearer {DEMO_TOKENS[args.agent]}"}, timeout=20,
+    )
+    if response.status_code != 200:
+        print(f"[DENIED] {response.status_code}: {response.json().get('detail')}")
+        sys.exit(1)
+    result = response.json()
+    print(f"[receipt] {result['receipt_id']} | exit={result['exit_code']}")
+    print(result["stdout"], end="")
+    if result["stderr"]:
+        print(result["stderr"], file=sys.stderr, end="")
 
 
 if __name__ == "__main__":
