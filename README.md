@@ -1,160 +1,180 @@
-# Access Broker (MVP) — временный SSH-доступ для AI-агентов
+# Access Broker (MVP) — temporary SSH access for AI agents
 
-Идея: агент не получает постоянный root-ключ и даже временный SSH
-сертификат. Вместо этого он передаёт broker'у структурированное намерение
-под конкретную задачу. Broker проверяет identity и policy, сам выпускает
-одноразовый ephemeral credential, выполняет строго разрешённую команду и
-возвращает агенту только результат.
+The idea: the agent never receives a permanent root key, nor even a temporary
+SSH certificate. Instead, it sends the broker a structured intent tied to a
+specific task. The broker verifies identity and policy, issues a one-time
+ephemeral credential itself, executes only the strictly allowed command, and
+returns just the result to the agent.
 
-## Проблема
+## Problem
 
-AI-агенты (Devin, Claude Code, Cursor) всё чаще получают прямой доступ
-к продакшн-инфраструктуре. Стандартная практика сегодня — выдать агенту
-постоянный SSH-ключ, часто с root-правами, потому что нормальный
-scoping доступа требует ручной настройки (отдельный юзер, sudoers,
-ротация) — а на это никогда нет времени.
+AI agents (Devin, Claude Code, Cursor) increasingly get direct access to
+production infrastructure. Today's standard practice is to hand the agent a
+permanent SSH key, often with root privileges, because proper access scoping
+requires manual setup (a separate user, sudoers, rotation) — and there is never
+time for that.
 
-Последствия:
-- **Доступ не истекает.** Ключ работает бессрочно, пока кто-то не
-  вспомнит его вручную отозвать.
-- **Нет границ на действия.** Галлюцинация, неверная интерпретация
-  задачи или prompt injection — и у агента хватит прав сделать что
-  угодно, не только то, что нужно для задачи.
-- **Нет разделения в логах.** Невозможно отличить, что сделал человек,
-  а что — агент во время конкретной задачи.
+Consequences:
+- **Access never expires.** The key works indefinitely until someone remembers
+  to revoke it by hand.
+- **No boundaries on actions.** A hallucination, a misread task, or a prompt
+  injection — and the agent has enough privileges to do anything, not just
+  what the task requires.
+- **No separation in logs.** It is impossible to tell what a human did from
+  what an agent did during a specific task.
 
-## Решение
+## Solution
 
-Access Broker выдаёт не ключ, а **временное, узко ограниченное право**:
-- **Time-boxed** — сертификат живёт минуты (в демо — секунды), потом
-  сам перестаёт работать. Ничего не нужно отзывать вручную.
-- **Intent-scoped** — агент отправляет типизированное действие и параметры,
-  например `read_service_logs(unit=nutricio-api, since_minutes=30, lines=20)`.
-  Broker проверяет policy и параметры, а затем подписывает SSH-сертификат,
-  содержащий *проверенный intent* в `force-command`. Сервер повторно
-  проверяет intent и исполняет только заранее разрешённую операцию.
-- **Authenticated** — agent identity выводится из bearer token, а не из
-  подставляемого клиентом `agent_name`.
-- **Audit by default** — каждый allow/deny и результат исполнения попадает
-  в hash-chained receipt с task ID, параметрами и serial сертификата.
+Access Broker issues not a key but a **temporary, narrowly scoped
+permission**:
+- **Time-boxed** — the certificate lives for minutes (seconds in the demo),
+  then simply stops working. Nothing needs to be revoked manually.
+- **Intent-scoped** — the agent sends a typed action with parameters, e.g.
+  `read_service_logs(unit=nutricio-api, since_minutes=30, lines=20)`.
+  The broker validates policy and parameters, then signs an SSH certificate
+  that carries the *validated intent* in its `force-command`. The server
+  re-validates the intent and executes only the pre-approved operation.
+- **Authenticated** — agent identity is derived from the bearer token, not
+  from a client-supplied `agent_name`.
+- **Audit by default** — every allow/deny and execution result lands in a
+  hash-chained receipt with the task ID, parameters, and certificate serial.
 
-Это не альтернатива системным промптам/`AGENTS.md` — это вторая, жёсткая
-линия защиты поверх них: если инструкция в промпте не сработала (её
-переписали инъекцией, модель её проигнорировала), граница на уровне
-инфраструктуры всё равно держит.
+This is not a replacement for system prompts / `AGENTS.md` — it is a second,
+hard line of defense on top of them: if a prompt instruction fails (rewritten
+by an injection, ignored by the model), the infrastructure-level boundary still
+holds.
 
-## Что это даёт
+## What it gives you
 
-| | Сейчас (статичный root-ключ) | С Access Broker |
+| | Today (static root key) | With Access Broker |
 |---|---|---|
-| Срок действия доступа | Бессрочно | Секунды-минуты, сам истекает |
-| Что можно сделать | Что угодно | Одна разрешённая команда |
-| Отзыв при увольнении/смене задачи | Вручную, легко забыть | Не требуется — доступ и так истёк |
-| Видимость (кто что делал) | Общий root-лог, не разделить агента и человека | Отдельная запись на каждый запрос доступа |
+| Access lifetime | Indefinite | Seconds to minutes, expires on its own |
+| What can be done | Anything | One allowed command |
+| Revocation on offboarding / task change | Manual, easy to forget | Not needed — access has already expired |
+| Visibility (who did what) | Shared root log, agent and human indistinguishable | A separate record for every access request |
 
-**Питч-фраза:**
+**Pitch line:**
 > Agents get root keys because scoping access takes too long.
 > We make scoped, expiring access as fast as handing over a static key.
 
-## Подготовка (сделать заранее, до демо)
+## Setup (do this ahead of the demo)
 
 ```bash
-# 1. Создать CA
+# 1. Create the CA
 ./setup_ca.sh
 cp ca/ca_key.pub server/ca_key.pub
 
-# 2. Поднять тестовый сервер (нужен Docker)
+# 2. Start the test server (requires Docker)
 docker compose up -d --build
 
-# 3. Pin публичный host key тестового сервера в доверенный known_hosts
+# 3. Pin the test server's public host key into a trusted known_hosts
 printf '[localhost]:2222 %s\n' "$(docker exec access-broker-demo-server cat /etc/ssh/ssh_host_ed25519_key.pub)" > known_hosts
 
-# 4. Запустить broker (отдельный терминал, из корня проекта)
+# 4. Start the broker (separate terminal, from the project root)
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/uvicorn broker.main:app --host 127.0.0.1 --port 8000
 ```
 
-Сервер генерирует свежие строки лога при запуске контейнера. При пересборке
-образа повторите шаг pin для нового host key. Никогда не получайте host key
-по недоверенному соединению без проверки отпечатка.
+The server generates fresh log lines when the container starts. If you rebuild
+the image, repeat the pin step for the new host key. Never fetch a host key
+over an untrusted connection without verifying its fingerprint.
 
-## Демо-сценарий: Devin запрашивает ограниченный доступ
+### Option: a real VPS instead of Docker
 
-Откройте Devin-сессию с этим репозиторием и попросите: «Для задачи INC-1842
-проверь ошибки nutricio-api за последние 30 минут через Access Broker.
-Затем попробуй получить логи vpn на том же сервере. Покажи receipts».
-Devin может исполнить клиент из корня репозитория:
+The target only needs `sshd` with `TrustedUserCAKeys /etc/ssh/ca_key.pub`,
+password-less `deploy_user`/`readonly_user`, `pydantic==2.10.4`,
+`broker/intents.py` in `/opt/access-broker/broker/`, `server/intent_runner.py`
+in `/opt/access-broker/`, `/usr/local/bin/restart_app.sh` and the demo logs in
+`/var/log/access-broker/` (mirror `server/Dockerfile` and
+`server/start-demo.sh`). The private CA key stays on the broker machine.
+Obtain the VPS host key over a trusted channel and pin it in `known_hosts` as
+`<host> ssh-ed25519 ...`. Point the broker at the VPS via environment:
+
+```bash
+BROKER_TARGET_HOST=<vps-ip> BROKER_TARGET_PORT=22 \
+  .venv/bin/uvicorn broker.main:app --host 127.0.0.1 --port 8000
+```
+
+## Demo scenario: Devin requests scoped access
+
+Open a Devin session on this repository and ask: "For task INC-1842, check
+nutricio-api errors from the last 30 minutes via Access Broker. Then try to
+fetch the vpn logs on the same server. Show the receipts."
+Devin can run the client from the repository root:
 
 ```bash
 .venv/bin/python client/agent_ssh.py read_service_logs --task-id INC-1842 \
   --params '{"unit":"nutricio-api","since_minutes":30,"lines":20,"contains":"ERROR"}'
 ```
-Ожидаемый результат: строка `ERROR nutricio-api timeout connecting to database`.
-В выводе также есть ID audit receipt. Агент не получает SSH credential.
+Expected result: the line `ERROR nutricio-api timeout connecting to database`.
+The output also includes the audit receipt ID. The agent never receives an SSH
+credential.
 
-Проверка policy: тот же агент не может выбрать чужой target или unit:
+Policy check: the same agent cannot pick someone else's target or unit:
 ```bash
 .venv/bin/python client/agent_ssh.py read_service_logs --target root-vpn-node-1 \
   --params '{"unit":"vpn"}' --task-id INC-1843
 .venv/bin/python client/agent_ssh.py read_service_logs \
   --params '{"unit":"vpn"}' --task-id INC-1844
 ```
-Ожидаемый результат: `403` и отдельный receipt для каждого отказа.
+Expected result: `403` and a separate receipt for each denial.
 
-Фильтр трактует спецсимволы буквально (нет shell):
+The filter treats special characters literally (no shell involved):
 ```bash
 .venv/bin/python client/agent_ssh.py read_service_logs \
   --params '{"unit":"nutricio-api","contains":"; touch /tmp/owned"}'
 docker exec access-broker-demo-server test ! -e /tmp/owned
 ```
-Команда не создаёт файл, даже если фильтр содержит синтаксис shell. Старые
-действия также работают: `restart_nutricio` и `show_vpn_logs` (для второго
-используйте `--agent vpn-support-agent`).
+The command does not create the file even though the filter contains shell
+syntax. The legacy actions still work too: `restart_nutricio` and
+`show_vpn_logs` (use `--agent vpn-support-agent` for the latter).
 
-Проверка цепочки receipts:
+Verify the receipt chain:
 
 ```bash
 curl -s http://127.0.0.1:8000/audit/verify
 curl -s http://127.0.0.1:8000/audit
 ```
 
-Чтобы Devin запускался на **другой** машине, разместите broker за HTTPS с
-аутентификацией и доступом только из доверенной сети; укажите `BROKER_URL` и
-`BROKER_DEVIN_TOKEN` в секретах сессии. По умолчанию клиент и broker работают
-локально с публично известными demo-токенами; такой запуск подходит только для
-демо на одной машине. Для удалённого Devin можно также поднять всю демо-среду
-внутри его сессии по шагам выше.
+To run Devin on a **different** machine, put the broker behind HTTPS with
+authentication and restrict access to a trusted network; set `BROKER_URL` and
+`BROKER_DEVIN_TOKEN` as session secrets. By default the client and broker run
+locally with publicly known demo tokens; that setup is only suitable for a
+single-machine demo. For a remote Devin you can also bring up the whole demo
+environment inside its session using the steps above.
 
-## Почему CA нужен даже с двумя скриптами
+## Why a CA is needed even with two scripts
 
-CA подписывает *точные параметры* операции, срок действия и Unix principal.
-Подмена исходной SSH-команды через `SSH_ORIGINAL_COMMAND` не меняет операцию
-из `force-command` сертификата. Payload кодируется в URL-safe base64, чтобы
-динамические данные не попадали в shell как синтаксис; на сервере schema
-проверяется снова. Чтение логов использует фиксированный mapping unit → файл
-и буквальный поиск подстроки, ограниченный числом строк и объёмом вывода.
-Ни один параметр агента не передаётся в командный интерпретатор.
+The CA signs the *exact parameters* of the operation, its validity window, and
+the Unix principal. Tampering with the original SSH command via
+`SSH_ORIGINAL_COMMAND` does not change the operation baked into the
+certificate's `force-command`. The payload is encoded as URL-safe base64 so
+dynamic data never reaches the shell as syntax; the schema is validated again
+on the server. Log reading uses a fixed unit → file mapping and a literal
+substring search, bounded by line count and output size. No agent parameter is
+ever passed to a command interpreter.
 
-## Питч-фраза
+## Pitch line
 
 > AI agents get permanent root SSH keys because scoping access takes too
 > long. We built a broker that issues short-lived, task-scoped SSH
 > certificates in seconds — the agent can only run the allowed command,
 > for a limited time, and every request is logged.
 
-## Что сознательно упрощено ради 3 часов
+## What was deliberately simplified for the 3-hour build
 
-- Identity использует известные demo bearer tokens; в production нужен OIDC
-  или mTLS и отдельные полномочия агента. HTTP audit API пока без auth.
-- Restart — только demo-скрипт. Логи — файлы внутри контейнера, а не
-  настоящий `journalctl` хоста: контейнер не запускает systemd. Для
-  настоящих хостов можно сохранить те же схемы и whitelist unit, но
-  заменить фиксированный file reader на `subprocess.run` с постоянным argv
-  вроде `["journalctl", "-u", unit, "-n", str(lines), "--no-pager"]`,
-  `shell=False`, timeout и лимитом вывода.
-- Policy — Python dict, без внешнего approval workflow; cert действует 30s,
-  но операция после запуска не прерывается истечением срока сертификата.
-- CA-ключ лежит на диске broker'а. Для production нужны защищённый signer,
-  pinning host key вне локального Docker и внешнее неизменяемое хранение
-  audit head: локальную цепочку можно переписать полностью.
+- Identity uses well-known demo bearer tokens; production needs OIDC or mTLS
+  and separate agent credentials. The HTTP audit API has no auth yet.
+- Restart is only a demo script. Logs are files inside the container, not the
+  host's real `journalctl`: the container does not run systemd. For real hosts
+  you can keep the same schemas and unit whitelist but replace the fixed file
+  reader with `subprocess.run` using a constant argv such as
+  `["journalctl", "-u", unit, "-n", str(lines), "--no-pager"]`, `shell=False`,
+  a timeout, and an output limit.
+- Policy is a Python dict with no external approval workflow; the cert is
+  valid for 30s, but an operation already running is not interrupted when the
+  certificate expires.
+- The CA key sits on the broker's disk. Production needs a protected signer,
+  host key pinning outside local Docker, and external immutable storage of the
+  audit head: the local chain can be rewritten entirely.

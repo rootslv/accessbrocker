@@ -1,5 +1,6 @@
 """Access Broker: authenticated intent → forced, ephemeral SSH capability."""
 
+import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -14,7 +15,8 @@ app = FastAPI(title="Access Broker — AI Capability Firewall")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 AUDIT = ReceiptLog(BASE_DIR / "logs" / "audit_receipts.log")
-EXECUTOR = SSHExecutor(BASE_DIR / "ca" / "ca_key", BASE_DIR / "known_hosts")
+EXECUTOR = SSHExecutor(BASE_DIR / "ca" / "ca_key", BASE_DIR / "known_hosts",
+                       ssh_port=os.getenv("BROKER_TARGET_PORT", "2222"))
 
 
 @app.post("/execute-intent")

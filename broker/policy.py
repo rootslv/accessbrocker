@@ -1,5 +1,6 @@
 """Default-deny policy for typed operations."""
 
+import os
 from dataclasses import dataclass
 
 from pydantic import ValidationError
@@ -20,20 +21,22 @@ class Capability:
     ttl: str
 
 
+_TARGET_HOST = os.getenv("BROKER_TARGET_HOST", "localhost")
+
 _RULES = {
     ("devin-prod", Action.RESTART_NUTRICIO, "nutricio-server"): {
-        "network_host": "localhost", "principal": "deploy_user",
+        "network_host": _TARGET_HOST, "principal": "deploy_user",
         "ttl": "30s",
     },
     ("vpn-support-agent", Action.SHOW_VPN_LOGS, "root-vpn-node-1"): {
-        "network_host": "localhost", "principal": "readonly_user",
+        "network_host": _TARGET_HOST, "principal": "readonly_user",
         "ttl": "30s",
     },
     ("devin-prod", Action.READ_SERVICE_LOGS, "nutricio-server"): {
-        "network_host": "localhost", "principal": "deploy_user", "ttl": "30s",
+        "network_host": _TARGET_HOST, "principal": "deploy_user", "ttl": "30s",
     },
     ("vpn-support-agent", Action.READ_SERVICE_LOGS, "root-vpn-node-1"): {
-        "network_host": "localhost", "principal": "readonly_user", "ttl": "30s",
+        "network_host": _TARGET_HOST, "principal": "readonly_user", "ttl": "30s",
     },
 }
 
