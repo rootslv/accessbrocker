@@ -1,4 +1,6 @@
 ca/
+server/ca_key.pub
+known_hosts
 logs/
 client/keys/
 __pycache__/
