@@ -1,4 +1,5 @@
 ca/
+known_hosts
 logs/
 client/keys/
 __pycache__/

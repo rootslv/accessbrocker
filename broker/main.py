@@ -14,7 +14,7 @@ app = FastAPI(title="Access Broker — AI Capability Firewall")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 AUDIT = ReceiptLog(BASE_DIR / "logs" / "audit_receipts.log")
-EXECUTOR = SSHExecutor(BASE_DIR / "ca" / "ca_key")
+EXECUTOR = SSHExecutor(BASE_DIR / "ca" / "ca_key", BASE_DIR / "known_hosts")
 
 
 @app.post("/execute-intent")
@@ -25,7 +25,8 @@ def execute_intent(intent: AgentIntent, agent: str = Depends(authenticate)):
     except PolicyDenied as error:
         receipt = AUDIT.append(
             "intent_denied", agent=agent, task_id=intent.task_id,
-            action=intent.action.value, target=intent.target, reason=str(error),
+            action=intent.action.value, target=intent.target, params=intent.params,
+            reason=str(error),
         )
         raise HTTPException(status_code=403, detail={"reason": str(error), "receipt_id": receipt["receipt_id"]})
 
@@ -34,14 +35,15 @@ def execute_intent(intent: AgentIntent, agent: str = Depends(authenticate)):
     except (RuntimeError, OSError) as error:
         receipt = AUDIT.append(
             "execution_failed", agent=agent, task_id=intent.task_id,
-            action=intent.action.value, target=intent.target, error=str(error),
+            action=intent.action.value, target=intent.target, params=intent.params,
+            error=str(error),
         )
         raise HTTPException(status_code=502, detail={"reason": "Broker execution failed", "receipt_id": receipt["receipt_id"]})
 
     receipt = AUDIT.append(
         "action_executed", agent=agent, task_id=intent.task_id,
         action=intent.action.value, target=intent.target,
-        principal=capability.principal, forced_command=capability.command,
+        params=intent.params, principal=capability.principal,
         certificate_serial=result.certificate_serial, exit_code=result.exit_code,
         output_hash=result.output_hash,
     )

@@ -23,28 +23,20 @@ scoping доступа требует ручной настройки (отде�
 - **Нет разделения в логах.** Невозможно отличить, что сделал человек,
   а что — агент во время конкретной задачи.
 
-Это не гипотетический риск:
-
-> **53%** организаций сообщили, что AI-агенты хотя бы раз превысили
-> заданные им права (Cloud Security Alliance, апрель 2026).
-> **47%** столкнулись с security-инцидентом с участием AI-агента
-> за последний год.
-
 ## Решение
 
 Access Broker выдаёт не ключ, а **временное, узко ограниченное право**:
 - **Time-boxed** — сертификат живёт минуты (в демо — секунды), потом
   сам перестаёт работать. Ничего не нужно отзывать вручную.
-- **Intent-scoped** — агент может запросить только заранее описанное
-  действие (`restart_nutricio` или `show_vpn_logs`), а не shell-команду.
-  Broker сам компилирует intent в команду. Даже если агент попросит что-то
-  другое, сервер физически выполнит только разрешённое —
-  `force-command` работает на уровне SSH-протокола, а не полагается
-  на то, что агент "послушается" инструкции в промпте.
+- **Intent-scoped** — агент отправляет типизированное действие и параметры,
+  например `read_service_logs(unit=nutricio-api, since_minutes=30, lines=20)`.
+  Broker проверяет policy и параметры, а затем подписывает SSH-сертификат,
+  содержащий *проверенный intent* в `force-command`. Сервер повторно
+  проверяет intent и исполняет только заранее разрешённую операцию.
 - **Authenticated** — agent identity выводится из bearer token, а не из
   подставляемого клиентом `agent_name`.
 - **Audit by default** — каждый allow/deny и результат исполнения попадает
-  в hash-chained receipt с task ID и serial сертификата.
+  в hash-chained receipt с task ID, параметрами и serial сертификата.
 
 Это не альтернатива системным промптам/`AGENTS.md` — это вторая, жёсткая
 линия защиты поверх них: если инструкция в промпте не сработала (её
@@ -68,57 +60,81 @@ Access Broker выдаёт не ключ, а **временное, узко ог
 
 ```bash
 # 1. Создать CA
-chmod +x setup_ca.sh
 ./setup_ca.sh
-
-# 2. Скопировать публичный ключ CA туда, откуда его подхватит Docker build
 cp ca/ca_key.pub server/ca_key.pub
 
-# 3. Поднять тестовый сервер
+# 2. Поднять тестовый сервер (нужен Docker)
 docker compose up -d --build
 
-# 4. Установить зависимости broker'а и клиента
-pip install fastapi uvicorn requests --break-system-packages
+# 3. Pin публичный host key тестового сервера в доверенный known_hosts
+printf '[localhost]:2222 %s\n' "$(docker exec access-broker-demo-server cat /etc/ssh/ssh_host_ed25519_key.pub)" > known_hosts
 
-# 5. Запустить broker (отдельный терминал, из корня проекта)
-uvicorn broker.main:app --port 8000
+# 4. Запустить broker (отдельный терминал, из корня проекта)
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn broker.main:app --host 127.0.0.1 --port 8000
 ```
 
-## Демо-сценарий (3 шага, ~2 минуты)
+Сервер генерирует свежие строки лога при запуске контейнера. При пересборке
+образа повторите шаг pin для нового host key. Никогда не получайте host key
+по недоверенному соединению без проверки отпечатка.
 
-**Терминал 1** — broker уже работает (см. выше).
+## Демо-сценарий: Devin запрашивает ограниченный доступ
 
-**Терминал 2** — агент запрашивает действие и получает только его результат:
-```bash
-cd client
-python agent_ssh.py restart_nutricio --task-id INC-1842
-```
-Ожидаемый результат: `[demo] restarting nutricio-api... done.` Агент не
-получает private key или certificate.
-
-**Терминал 2** — подмена identity или target не помогает:
-```bash
-python agent_ssh.py restart_nutricio --target root-vpn-node-1 --task-id INC-1843
-```
-Ожидаемый результат: `403`. Policy привязывает identity, action и target.
-Сам broker намеренно просит SSH выполнить `rm -rf /tmp/not-run`; в итоге
-`sshd` выполняет только зашитый `restart_app.sh`.
-
-**Терминал 2** — проверка целостности журнала:
-```bash
-curl localhost:8000/audit/verify | jq
-```
-
-## Audit log
+Откройте Devin-сессию с этим репозиторием и попросите: «Для задачи INC-1842
+проверь ошибки nutricio-api за последние 30 минут через Access Broker.
+Затем попробуй получить логи vpn на том же сервере. Покажи receipts».
+Devin может исполнить клиент из корня репозитория:
 
 ```bash
-cat logs/audit_receipts.log
-# или через broker:
-curl localhost:8000/audit | jq
+.venv/bin/python client/agent_ssh.py read_service_logs --task-id INC-1842 \
+  --params '{"unit":"nutricio-api","since_minutes":30,"lines":20,"contains":"ERROR"}'
 ```
-Каждая строка — одно решение или исполнение: verified agent, task ID, action,
-target, serial сертификата, exit code и hash результата. `GET /audit/verify`
-проверяет hash-chain.
+Ожидаемый результат: строка `ERROR nutricio-api timeout connecting to database`.
+В выводе также есть ID audit receipt. Агент не получает SSH credential.
+
+Проверка policy: тот же агент не может выбрать чужой target или unit:
+```bash
+.venv/bin/python client/agent_ssh.py read_service_logs --target root-vpn-node-1 \
+  --params '{"unit":"vpn"}' --task-id INC-1843
+.venv/bin/python client/agent_ssh.py read_service_logs \
+  --params '{"unit":"vpn"}' --task-id INC-1844
+```
+Ожидаемый результат: `403` и отдельный receipt для каждого отказа.
+
+Фильтр трактует спецсимволы буквально (нет shell):
+```bash
+.venv/bin/python client/agent_ssh.py read_service_logs \
+  --params '{"unit":"nutricio-api","contains":"; touch /tmp/owned"}'
+docker exec access-broker-demo-server test ! -e /tmp/owned
+```
+Команда не создаёт файл, даже если фильтр содержит синтаксис shell. Старые
+действия также работают: `restart_nutricio` и `show_vpn_logs` (для второго
+используйте `--agent vpn-support-agent`).
+
+Проверка цепочки receipts:
+
+```bash
+curl -s http://127.0.0.1:8000/audit/verify
+curl -s http://127.0.0.1:8000/audit
+```
+
+Чтобы Devin запускался на **другой** машине, разместите broker за HTTPS с
+аутентификацией и доступом только из доверенной сети; укажите `BROKER_URL` и
+`BROKER_DEVIN_TOKEN` в секретах сессии. По умолчанию клиент и broker работают
+локально с публично известными demo-токенами; такой запуск подходит только для
+демо на одной машине. Для удалённого Devin можно также поднять всю демо-среду
+внутри его сессии по шагам выше.
+
+## Почему CA нужен даже с двумя скриптами
+
+CA подписывает *точные параметры* операции, срок действия и Unix principal.
+Подмена исходной SSH-команды через `SSH_ORIGINAL_COMMAND` не меняет операцию
+из `force-command` сертификата. Payload кодируется в URL-safe base64, чтобы
+динамические данные не попадали в shell как синтаксис; на сервере schema
+проверяется снова. Чтение логов использует фиксированный mapping unit → файл
+и буквальный поиск подстроки, ограниченный числом строк и объёмом вывода.
+Ни один параметр агента не передаётся в командный интерпретатор.
 
 ## Питч-фраза
 
@@ -129,10 +145,16 @@ target, serial сертификата, exit code и hash результата. `
 
 ## Что сознательно упрощено ради 3 часов
 
-- Identity использует demo bearer tokens. В production это OIDC/mTLS, а не
-  токены из environment variables.
-- Policy — обычный Python dict, не YAML/DB (для демо этого достаточно)
-- Нет ротации host-сертификата (не нужна для короткого демо)
-- CA-ключ лежит на диске broker'а без доп. изоляции. В production signer
-  должен быть отдельным сервисом/HSM, а audit head — отправляться во внешнее
-  неизменяемое хранилище.
+- Identity использует известные demo bearer tokens; в production нужен OIDC
+  или mTLS и отдельные полномочия агента. HTTP audit API пока без auth.
+- Restart — только demo-скрипт. Логи — файлы внутри контейнера, а не
+  настоящий `journalctl` хоста: контейнер не запускает systemd. Для
+  настоящих хостов можно сохранить те же схемы и whitelist unit, но
+  заменить фиксированный file reader на `subprocess.run` с постоянным argv
+  вроде `["journalctl", "-u", unit, "-n", str(lines), "--no-pager"]`,
+  `shell=False`, timeout и лимитом вывода.
+- Policy — Python dict, без внешнего approval workflow; cert действует 30s,
+  но операция после запуска не прерывается истечением срока сертификата.
+- CA-ключ лежит на диске broker'а. Для production нужны защищённый signer,
+  pinning host key вне локального Docker и внешнее неизменяемое хранение
+  audit head: локальную цепочку можно переписать полностью.

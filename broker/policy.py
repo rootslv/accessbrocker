@@ -1,8 +1,11 @@
-"""Default-deny policy and intent-to-command compilation."""
+"""Default-deny policy for typed operations."""
 
 from dataclasses import dataclass
 
-from broker.models import Action, AgentIntent
+from pydantic import ValidationError
+
+from broker.intents import Action, IntentPayload, validate_payload
+from broker.models import AgentIntent
 
 
 @dataclass(frozen=True)
@@ -13,18 +16,24 @@ class Capability:
     target: str
     network_host: str
     principal: str
-    command: str
+    payload: str
     ttl: str
 
 
 _RULES = {
     ("devin-prod", Action.RESTART_NUTRICIO, "nutricio-server"): {
         "network_host": "localhost", "principal": "deploy_user",
-        "command": "/usr/local/bin/restart_app.sh", "ttl": "30s",
+        "ttl": "30s",
     },
     ("vpn-support-agent", Action.SHOW_VPN_LOGS, "root-vpn-node-1"): {
         "network_host": "localhost", "principal": "readonly_user",
-        "command": "/usr/local/bin/show_logs.sh", "ttl": "30s",
+        "ttl": "30s",
+    },
+    ("devin-prod", Action.READ_SERVICE_LOGS, "nutricio-server"): {
+        "network_host": "localhost", "principal": "deploy_user", "ttl": "30s",
+    },
+    ("vpn-support-agent", Action.READ_SERVICE_LOGS, "root-vpn-node-1"): {
+        "network_host": "localhost", "principal": "readonly_user", "ttl": "30s",
     },
 }
 
@@ -37,4 +46,13 @@ def authorize(agent: str, intent: AgentIntent) -> Capability:
     rule = _RULES.get((agent, intent.action, intent.target))
     if rule is None:
         raise PolicyDenied("This agent is not permitted to perform this action on this target")
-    return Capability(agent=agent, task_id=intent.task_id, action=intent.action.value, target=intent.target, **rule)
+    try:
+        payload = validate_payload(IntentPayload.model_validate({
+            "action": intent.action, "target": intent.target, "params": intent.params,
+        }))
+    except (ValidationError, ValueError) as error:
+        raise PolicyDenied(f"Invalid intent parameters: {error}") from error
+    return Capability(
+        agent=agent, task_id=intent.task_id, action=intent.action.value,
+        target=intent.target, payload=payload.model_dump_json(), **rule,
+    )

@@ -1,7 +1,8 @@
 services:
   test-server:
     build:
-      context: ./server
+      context: .
+      dockerfile: server/Dockerfile
     ports:
       - "2222:22"
     container_name: access-broker-demo-server

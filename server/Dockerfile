@@ -1,27 +1,29 @@
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y openssh-server sudo && \
-    mkdir -p /var/run/sshd
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server python3 python3-pip && \
+    python3 -m pip install --no-cache-dir pydantic==2.10.4 && \
+    rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd
 
-# Юзер, под которым будет заходить агент (не root!)
 RUN useradd -m -s /bin/bash deploy_user && \
-    useradd -m -s /bin/bash readonly_user
+    useradd -m -s /bin/bash readonly_user && \
+    usermod -p '*' deploy_user && usermod -p '*' readonly_user
 
-# Пример "деплой"-скрипта, который агенту разрешено вызывать
 RUN echo '#!/bin/bash\necho "[demo] restarting nutricio-api... done."' \
     > /usr/local/bin/restart_app.sh && \
     chmod +x /usr/local/bin/restart_app.sh
 
-RUN echo '#!/bin/bash\necho "[demo] recent logs:"; echo "2026-09-24 12:00:01 INFO service healthy"' \
-    > /usr/local/bin/show_logs.sh && \
-    chmod +x /usr/local/bin/show_logs.sh
+COPY broker/intents.py /opt/access-broker/broker/intents.py
+COPY server/intent_runner.py /opt/access-broker/intent_runner.py
+COPY server/start-demo.sh /opt/access-broker/start-demo.sh
+RUN chmod 755 /opt/access-broker/start-demo.sh
 
-COPY ca_key.pub /etc/ssh/ca_key.pub
+COPY server/ca_key.pub /etc/ssh/ca_key.pub
 RUN chmod 644 /etc/ssh/ca_key.pub
 
 RUN echo "TrustedUserCAKeys /etc/ssh/ca_key.pub" >> /etc/ssh/sshd_config && \
     echo "LogLevel VERBOSE" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config
 
 EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D"]
+CMD ["/opt/access-broker/start-demo.sh"]
