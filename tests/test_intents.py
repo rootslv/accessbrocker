@@ -17,12 +17,18 @@ from pydantic import ValidationError
 
 from broker.execution import SSHExecutor
 from broker.intents import Action, IntentPayload, validate_payload
+from broker.main import app
 from broker.models import AgentIntent
 from broker.policy import PolicyDenied, authorize
 from server import intent_runner
 
 
 class IntentTests(unittest.TestCase):
+    def test_openapi_exposes_bearer_auth_for_browser_demo(self):
+        operation = app.openapi()["paths"]["/execute-intent"]["post"]
+        self.assertEqual(operation["security"], [{"HTTPBearer": []}])
+        self.assertNotIn("parameters", operation)
+
     def test_authorized_log_filter_is_literal_and_bound_to_certificate(self):
         intent = AgentIntent(
             task_id="INC-1842", action=Action.READ_SERVICE_LOGS,
